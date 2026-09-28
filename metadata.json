@@ -1,6 +1,1 @@
-{
-  "name": "Web SSH Client",
-  "description": "Connect to your servers via SSH",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
+{"description":"Connect to your servers via SSH","majorCapabilities":[],"name":"Web SSH Client","requestFramePermissions":[]}

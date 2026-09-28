@@ -1,20 +1,32 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Terminal-bird
 
-# Run and deploy your AI Studio app
+A web SSH client: connect to your servers from the browser with a full
+xterm.js terminal. Self-hosted, keyless — your SSH credentials are entered
+per session in the browser and never stored.
 
-This contains everything you need to run your app locally.
+## How it works
 
-View your app in AI Studio: https://ai.studio/apps/09d3c27a-d49d-4aa1-b7fd-15276f003783
+- `server.ts` — Express + Socket.IO backend. Spawns `ssh2` connections and
+  bridges them to the browser over WebSockets. `POST /api/verify` tests
+  credentials before opening a shell.
+- `src/` — React 19 + Vite + Tailwind frontend: connection form, then a
+  full-screen xterm.js terminal with resize support.
 
-## Run Locally
+## Run
 
-**Prerequisites:**  Node.js
+```bash
+npm install
+npm run dev      # vite middleware + socket.io on :3000
+# production:
+npm run build
+npm start        # serves dist/ + API on $PORT (default 3000)
+```
 
+Set `PORT` to change the listen port.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Security notes
+
+- Credentials travel between your browser and **your own server only**.
+  Always serve over HTTPS (reverse proxy) in production — never expose the
+  plain-HTTP dev server to the internet.
+- No API keys required. Nothing is logged or persisted.

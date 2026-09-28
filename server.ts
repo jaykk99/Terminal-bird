@@ -9,7 +9,7 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: '*' }
 });
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
 app.use(express.json());
 

@@ -1,0 +1,22 @@
+# render.yaml — Render Blueprint for Terminal-bird
+#
+# One-click deploy: `render blueprint launch` or "New > Blueprint" in the
+# Render dashboard pointed at this repo. The service builds this Dockerfile,
+# which compiles the Vite frontend and bundles the Socket.IO backend.
+#
+# Notes:
+#  - Socket.IO works on Render web services without extra config.
+#  - The app itself is plain HTTP; terminate TLS at Render (or your reverse
+#    proxy) — SSH credentials travel browser -> your server, so always serve
+#    over HTTPS in production.
+
+services:
+  - type: web
+    name: terminal-bird
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production

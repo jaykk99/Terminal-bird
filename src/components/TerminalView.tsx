@@ -9,15 +9,22 @@ import {
   WifiOff,
   Keyboard,
   X,
+  Search,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import 'xterm/css/xterm.css';
 import type { SshCredentials, SshErrorCode, SshErrorInfo } from '../types';
 import { MobileKeyBar } from './MobileKeyBar';
 
+export type SessionEventType = 'connected' | 'disconnected' | 'error';
+
 interface TerminalViewProps {
   credentials: SshCredentials;
   active: boolean;
   onDisconnect: () => void;
+  /** Session lifecycle events (used for the local audit log in App). */
+  onEvent?: (type: SessionEventType, detail?: string) => void;
 }
 
 type Phase = 'connecting' | 'connected' | 'error' | 'closed';
@@ -40,7 +47,7 @@ const ERROR_TITLES: Record<SshErrorCode, string> = {
   unknown: 'Connection Failed',
 };
 
-export function TerminalView({ credentials, active, onDisconnect }: TerminalViewProps) {
+export function TerminalView({ credentials, active, onDisconnect, onEvent }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -48,10 +55,17 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
   const [phase, setPhase] = useState<Phase>('connecting');
   const [error, setError] = useState<SshErrorInfo | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
+  const [latencyHist, setLatencyHist] = useState<number[]>([]);
   const [showKeys, setShowKeys] = useState(
     () => typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches,
   );
   const [ctrlActive, setCtrlActive] = useState(false);
+  // Find-in-scrollback state
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findPos, setFindPos] = useState<{ index: number; total: number } | null>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const findHitsRef = useRef<{ row: number; col: number }[]>([]);
   const ctrlRef = useRef(false);
   const attemptRef = useRef(0);
   const phaseRef = useRef<Phase>('connecting');
@@ -76,6 +90,75 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
     s.emit('ssh-data', seq);
     term?.focus();
   }, []);
+
+  // ── Find in scrollback ─────────────────────────────────────────────────
+  // Walks the xterm buffer for the query, jumps the viewport to each hit and
+  // selects it. Ctrl+F opens the bar (wired via attachCustomKeyEventHandler),
+  // Enter/Shift+Enter step through matches, Esc closes.
+
+  const collectFindHits = useCallback((): { row: number; col: number }[] => {
+    const term = termRef.current;
+    const hits: { row: number; col: number }[] = [];
+    if (!term || !findQuery) return hits;
+    const q = findQuery.toLowerCase();
+    const buf = term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const text = line.translateToString(true).toLowerCase();
+      let idx = text.indexOf(q);
+      while (idx !== -1) {
+        hits.push({ row: i, col: idx });
+        idx = text.indexOf(q, idx + q.length);
+      }
+    }
+    return hits;
+  }, [findQuery]);
+
+  const jumpToHit = useCallback(
+    (index: number) => {
+      const term = termRef.current;
+      const hits = findHitsRef.current;
+      if (!term || hits.length === 0) {
+        setFindPos(null);
+        return;
+      }
+      const wrapped = ((index % hits.length) + hits.length) % hits.length;
+      const hit = hits[wrapped];
+      const buf = term.buffer.active;
+      term.scrollLines(hit.row - Math.floor(term.rows / 2) - buf.viewportY);
+      term.select(hit.col, hit.row, findQuery.length);
+      setFindPos({ index: wrapped, total: hits.length });
+    },
+    [findQuery],
+  );
+
+  const runFind = useCallback(() => {
+    findHitsRef.current = collectFindHits();
+    jumpToHit(0);
+  }, [collectFindHits, jumpToHit]);
+
+  const findStep = useCallback(
+    (dir: 1 | -1) => {
+      if (!findPos) {
+        runFind();
+        return;
+      }
+      jumpToHit(findPos.index + dir);
+    },
+    [findPos, runFind, jumpToHit],
+  );
+
+  // Re-run the search as the query changes; clear the selection on close.
+  useEffect(() => {
+    if (findOpen) {
+      runFind();
+      findInputRef.current?.focus();
+    } else {
+      termRef.current?.clearSelection();
+      setFindPos(null);
+    }
+  }, [findOpen, runFind]);
 
   const connect = useCallback(() => {
     const term = termRef.current;
@@ -109,6 +192,7 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
       setError(null);
       term.clear();
       term.focus();
+      onEvent?.('connected');
     });
 
     s.on('ssh-data', (data: string) => {
@@ -121,16 +205,19 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
       setError(normalized);
       setPhaseBoth('error');
       term.writeln(`\r\n\x1b[31m${normalized.message}\x1b[0m`);
+      onEvent?.('error', normalized.code);
     });
 
     s.on('ssh-close', () => {
       setPhaseBoth('closed');
       term.writeln('\r\n\x1b[31mConnection closed by remote host.\x1b[0m\r\n');
+      onEvent?.('disconnected');
     });
 
     s.on('disconnect', (reason) => {
       if (phaseRef.current !== 'error' && reason !== 'io client disconnect') {
         setPhaseBoth('closed');
+        onEvent?.('disconnected');
       }
     });
 
@@ -138,12 +225,14 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
     s.on('ping', () => {
       const t0 = performance.now();
       const onPong = () => {
-        setLatency(Math.round(performance.now() - t0));
+        const ms = Math.round(performance.now() - t0);
+        setLatency(ms);
+        setLatencyHist((prev) => [...prev.slice(-29), ms]);
         s.off('pong', onPong);
       };
       s.on('pong', onPong);
     });
-  }, [credentials]);
+  }, [credentials, onEvent]);
 
   // One-time xterm setup.
   useEffect(() => {
@@ -189,6 +278,15 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
 
     termRef.current = term;
     fitRef.current = fit;
+
+    // Ctrl/Cmd+F opens find-in-scrollback instead of the browser's find.
+    term.attachCustomKeyEventHandler((e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        setFindOpen(true);
+        return false;
+      }
+      return true;
+    });
 
     term.onData((data) => {
       if (ctrlRef.current && /^[a-zA-Z]$/.test(data)) {
@@ -251,6 +349,21 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
   }, [active ]);
 
   const ErrIcon = error ? ERROR_ICONS[error.code] : WifiOff;
+
+  /** Render a latency history as a 56x16 sparkline polyline. */
+  const sparkPoints = (hist: number[]): string => {
+    if (hist.length < 2) return '';
+    const min = Math.min(...hist);
+    const max = Math.max(...hist);
+    const span = Math.max(1, max - min);
+    return hist
+      .map((v, i) => {
+        const x = (i / (hist.length - 1)) * 56;
+        const y = 15 - ((v - min) / span) * 14;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(' ');
+  };
   const statusColor =
     phase === 'connected' ? 'bg-green-500' : phase === 'error' ? 'bg-red-500' : phase === 'closed' ? 'bg-red-500' : 'bg-yellow-500 animate-pulse';
   const statusText =
@@ -267,6 +380,54 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
       {/* Terminal surface */}
       <div className="flex-1 w-full relative overflow-hidden">
         <div ref={terminalRef} className="absolute inset-0 px-3 py-2" />
+        {/* Find in scrollback */}
+        {findOpen && (
+          <div className="absolute top-2 right-2 z-20 flex items-center gap-1 bg-[#161b22] border border-white/15 rounded-lg px-2 py-1.5 shadow-xl">
+            <Search className="w-3.5 h-3.5 text-white/40 shrink-0" />
+            <input
+              ref={findInputRef}
+              value={findQuery}
+              onChange={(e) => setFindQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  findStep(e.shiftKey ? -1 : 1);
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setFindOpen(false);
+                }
+              }}
+              placeholder="Find in scrollback"
+              className="w-40 bg-transparent text-xs text-white placeholder-white/30 focus:outline-none"
+            />
+            {findPos && findQuery && (
+              <span className="text-[11px] text-white/40 font-mono shrink-0">
+                {findPos.index + 1}/{findPos.total}
+              </span>
+            )}
+            <button
+              onClick={() => findStep(-1)}
+              className="p-1 text-white/40 hover:text-white/80 rounded"
+              title="Previous match (Shift+Enter)"
+            >
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => findStep(1)}
+              className="p-1 text-white/40 hover:text-white/80 rounded"
+              title="Next match (Enter)"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setFindOpen(false)}
+              className="p-1 text-white/40 hover:text-white/80 rounded"
+              title="Close (Esc)"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
         {/* reconnect overlay */}
         {(phase === 'error' || phase === 'closed') && (
           <button
@@ -322,7 +483,19 @@ export function TerminalView({ credentials, active, onDisconnect }: TerminalView
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {latency !== null && phase === 'connected' && (
-            <span className="text-white/30 font-mono">{latency}ms</span>
+            <>
+              {latencyHist.length > 1 && (
+                <svg width="56" height="16" className="opacity-70" aria-hidden="true">
+                  <polyline
+                    points={sparkPoints(latencyHist)}
+                    fill="none"
+                    stroke="#5af78e"
+                    strokeWidth="1.5"
+                  />
+                </svg>
+              )}
+              <span className="text-white/30 font-mono">{latency}ms</span>
+            </>
           )}
           <button
             onClick={() => setShowKeys((v) => !v)}

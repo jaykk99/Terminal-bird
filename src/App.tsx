@@ -5,8 +5,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ConnectionHub } from './components/ConnectionHub';
-import { TerminalView } from './components/TerminalView';
+import { TerminalView, type SessionEventType } from './components/TerminalView';
 import { TabBar } from './components/TabBar';
+import { recordAudit } from './lib/audit';
 import type { SessionTab, SshCredentials } from './types';
 
 function newTabId(): string {
@@ -17,6 +18,8 @@ export default function App() {
   const [tabs, setTabs] = useState<SessionTab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [showHub, setShowHub] = useState(true);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [switcherQuery, setSwitcherQuery] = useState('');
   const passphraseRef = useRef<string | null>(null);
 
   const getPassphrase = useCallback(() => passphraseRef.current, []);
@@ -52,9 +55,21 @@ export default function App() {
     });
   }, []);
 
-  // Keyboard shortcuts: Alt+1..9 switch tabs, Alt+N new, Alt+W close active.
+  // Keyboard shortcuts: Alt+1..9 switch tabs, Alt+N new, Alt+W close active,
+  // Ctrl/Cmd+K opens the session quick-switcher.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+        const t = e.target as HTMLElement | null;
+        const typing =
+          t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+        if (!typing && tabs.length > 1) {
+          e.preventDefault();
+          setSwitcherQuery('');
+          setSwitcherOpen(true);
+        }
+        return;
+      }
       if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       const key = e.key.toLowerCase();
       if (key === 'n') {
@@ -77,6 +92,26 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [tabs, activeId, closeTab]);
+
+  /** Record session lifecycle events to the local audit log. */
+  const handleSessionEvent = useCallback(
+    (tab: SessionTab) => (type: SessionEventType, detail?: string) => {
+      recordAudit({
+        host: tab.creds.host,
+        port: tab.creds.port,
+        username: tab.creds.username,
+        outcome: type,
+        detail,
+      });
+    },
+    [],
+  );
+
+  const filteredTabs = switcherQuery
+    ? tabs.filter((t) =>
+        `${t.label} ${t.creds.host} ${t.creds.username}`.toLowerCase().includes(switcherQuery.toLowerCase()),
+      )
+    : tabs;
 
   if (showHub || tabs.length === 0) {
     return (
@@ -118,9 +153,60 @@ export default function App() {
             credentials={tab.creds}
             active={tab.id === activeId}
             onDisconnect={() => closeTab(tab.id)}
+            onEvent={handleSessionEvent(tab)}
           />
         ))}
       </div>
+
+      {/* Session quick-switcher (Ctrl/Cmd+K) */}
+      {switcherOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-24 bg-black/60 p-4"
+          onClick={() => setSwitcherOpen(false)}
+        >
+          <div
+            className="w-full max-w-md bg-[#161b22] border border-white/10 rounded-2xl shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              autoFocus
+              value={switcherQuery}
+              onChange={(e) => setSwitcherQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setSwitcherOpen(false);
+                else if (e.key === 'Enter' && filteredTabs.length > 0) {
+                  setActiveId(filteredTabs[0].id);
+                  setShowHub(false);
+                  setSwitcherOpen(false);
+                }
+              }}
+              placeholder="Search sessions…"
+              className="w-full bg-transparent px-4 py-3 text-sm text-white placeholder-white/30 focus:outline-none border-b border-white/10"
+            />
+            <div className="max-h-64 overflow-y-auto py-1">
+              {filteredTabs.length === 0 && (
+                <p className="px-4 py-3 text-xs text-white/30">No sessions match.</p>
+              )}
+              {filteredTabs.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => {
+                    setActiveId(t.id);
+                    setShowHub(false);
+                    setSwitcherOpen(false);
+                  }}
+                  className={`w-full text-left px-4 py-2.5 text-sm transition-colors ${
+                    t.id === activeId ? 'bg-blue-600/15 text-white' : 'text-white/70 hover:bg-white/5'
+                  }`}
+                >
+                  <span className="font-medium">{t.label}</span>
+                  <span className="ml-2 text-xs text-white/30 font-mono">:{t.creds.port}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

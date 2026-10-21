@@ -20,6 +20,17 @@ per session in the browser and never leave your own server.
   classified errors (auth failure vs unreachable vs timeout vs reset),
   10s connect timeouts, SSH keepalive (15s), and rate limiting on the
   verify endpoint (15 attempts/min per IP). Credentials are never logged.
+- **Saved-host import/export** — download all profiles as JSON (encrypted
+  passwords stay encrypted inside the export), import on another device.
+  Invalid entries are skipped and reported, never silently dropped.
+- **Find in scrollback** — `Ctrl+F` in a terminal searches the buffer,
+  Enter/Shift+Enter steps through matches with a live match count.
+- **Latency graph** — the status bar shows a sparkline of recent round-trip
+  ping samples next to the current latency.
+- **Session quick-switch** — `Ctrl+K` opens a search over open sessions.
+- **Connection audit log** — local-only record of connection attempts (host,
+  user, time, outcome). Passwords are never recorded. Toggleable in the hub,
+  clearable any time.
 
 ## How it works
 
@@ -46,6 +57,70 @@ npm start        # serves dist/ + API on $PORT (default 3000)
 ```
 
 Set `PORT` to change the listen port.
+
+```bash
+npm test         # vitest: crypto, profiles, audit log, server validation
+npm run lint     # tsc --noEmit
+```
+
+## Deploy
+
+### Docker
+
+```bash
+docker build -t terminal-bird .
+docker run -p 3000:3000 -e PORT=3000 terminal-bird
+```
+
+The image builds the Vite frontend, bundles `server.ts`, and runs it via
+`node dist/server.cjs`. A `HEALTHCHECK` probes `GET /api/health`.
+
+### Render
+
+`render.yaml` is a Render Blueprint: one-click deploy of the Docker service
+with `healthCheckPath: /api/health`. Socket.IO works on Render web services
+with no extra config — no sticky sessions needed since the app keeps session
+state in a single instance.
+
+## Reverse proxy (HTTPS)
+
+The app itself speaks plain HTTP. Always terminate TLS in front of it in
+production — SSH credentials travel browser → your server. The proxy must
+forward WebSocket upgrades (Socket.IO).
+
+**nginx:**
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ssh.example.com;
+
+    ssl_certificate     /etc/ssl/certs/ssh.example.com.crt;
+    ssl_certificate_key /etc/ssl/private/ssh.example.com.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400s;  # keep idle SSH sockets alive
+    }
+}
+```
+
+**Caddy (automatic HTTPS):**
+
+```caddy
+ssh.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+Caddy forwards the `Upgrade` header by default, so Socket.IO works with no
+extra directives.
 
 ## Security notes
 

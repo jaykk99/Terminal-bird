@@ -1,7 +1,8 @@
+/// <reference types="vitest/config" />
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite';
 
 export default defineConfig(() => {
   return {
@@ -10,6 +11,13 @@ export default defineConfig(() => {
       alias: {
         '@': path.resolve(__dirname, '.'),
       },
+    },
+    test: {
+      environment: 'node',
+      include: ['**/*.test.ts'],
+      setupFiles: ['./vitest.setup.ts'],
+      // Keeps server.ts importable in tests: skips startServer()'s listen.
+      env: { TB_NO_LISTEN: '1' },
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.

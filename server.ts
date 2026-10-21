@@ -354,4 +354,8 @@ async function startServer() {
   });
 }
 
-startServer();
+// Skipped under test (TB_NO_LISTEN=1) so the exported validators and error
+// classifier can be unit-tested without binding a port.
+if (process.env.TB_NO_LISTEN !== '1') {
+  startServer();
+}

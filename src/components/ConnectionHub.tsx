@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Server,
   User,
@@ -13,6 +13,9 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  Download,
+  Upload,
+  History,
 } from 'lucide-react';
 import type {
   ConnectionProfile,
@@ -26,7 +29,17 @@ import {
   deleteProfile,
   touchProfile,
   newProfileId,
+  exportProfiles,
+  importProfiles,
 } from '../lib/profiles';
+import {
+  recordAudit,
+  listAudit,
+  clearAudit,
+  isAuditEnabled,
+  setAuditEnabled,
+  type AuditEntry,
+} from '../lib/audit';
 import { encryptSecret, decryptSecret, isEncryptedSecret } from '../lib/crypto';
 
 interface ConnectionHubProps {
@@ -66,6 +79,46 @@ export function ConnectionHub({ onConnect, getPassphrase, setPassphrase }: Conne
   const [passError, setPassError] = useState<string | null>(null);
   const [passBusy, setPassBusy] = useState(false);
 
+  // Import / export state
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+
+  // Audit log state
+  const [auditOn, setAuditOn] = useState(() => isAuditEnabled());
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>(() => listAudit().slice(0, 8));
+  const [showAudit, setShowAudit] = useState(false);
+
+  const handleExport = () => {
+    const blob = new Blob([exportProfiles()], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `terminal-bird-profiles-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      const r = importProfiles(text);
+      if (r.imported > 0) setProfiles(listProfiles());
+      const bits = [`${r.imported} imported`, `${r.skipped} skipped`];
+      if (r.errors.length) bits.push(r.errors.join(' '));
+      setImportNotice(bits.join(' — '));
+    } catch {
+      setImportNotice('Could not read that file.');
+    }
+  };
+
+  const toggleAudit = () => {
+    const next = !auditOn;
+    setAuditEnabled(next);
+    setAuditOn(next);
+    if (!next) setShowAudit(false);
+    else setAuditEntries(listAudit().slice(0, 8));
+  };
+
   const verify = async (creds: SshCredentials): Promise<boolean> => {
     setLoading(true);
     setError(null);
@@ -90,7 +143,16 @@ export function ConnectionHub({ onConnect, getPassphrase, setPassphrase }: Conne
   };
 
   const connectNow = async (creds: SshCredentials, profileId?: string) => {
+    const profile = profileId ? profiles.find((p) => p.id === profileId) : undefined;
     const ok = await verify(creds);
+    recordAudit({
+      host: creds.host,
+      port: creds.port,
+      username: creds.username,
+      profileName: profile?.name,
+      outcome: ok ? 'verify-ok' : 'verify-fail',
+    });
+    setAuditEntries(listAudit().slice(0, 8));
     if (ok) {
       if (profileId) setProfiles(touchProfile(profileId));
       onConnect(creds);
@@ -381,10 +443,43 @@ export function ConnectionHub({ onConnect, getPassphrase, setPassphrase }: Conne
 
         {/* Saved profiles card */}
         <div className="bg-white/5 border border-white/10 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl flex flex-col">
-          <h3 className="text-xl font-medium text-white tracking-tight mb-1">Saved Hosts</h3>
+          <div className="flex items-start justify-between gap-3 mb-1">
+            <h3 className="text-xl font-medium text-white tracking-tight">Saved Hosts</h3>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={handleExport}
+                disabled={profiles.length === 0}
+                className="p-1.5 text-white/40 hover:text-white/80 rounded-lg disabled:opacity-30"
+                title="Export profiles as JSON"
+              >
+                <Download className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => importInputRef.current?.click()}
+                className="p-1.5 text-white/40 hover:text-white/80 rounded-lg"
+                title="Import profiles from JSON"
+              >
+                <Upload className="w-4 h-4" />
+              </button>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleImportFile(f);
+                  e.target.value = '';
+                }}
+              />
+            </div>
+          </div>
           <p className="text-white/50 text-sm mb-5">
             Stored only in this browser. Passwords are encrypted with your passphrase (AES-256-GCM).
           </p>
+          {importNotice && (
+            <p className="text-xs text-blue-300/80 mb-3 -mt-2">{importNotice}</p>
+          )}
 
           {profiles.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center text-center py-10">
@@ -445,6 +540,79 @@ export function ConnectionHub({ onConnect, getPassphrase, setPassphrase }: Conne
                   )}
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Audit log */}
+      <div className="relative w-full max-w-3xl z-10 mt-6">
+        <div className="bg-white/5 border border-white/10 rounded-2xl px-5 py-4 shadow-2xl backdrop-blur-xl">
+          <div className="flex items-center justify-between">
+            <button
+              onClick={() => setShowAudit((v) => !v)}
+              className="flex items-center gap-2 text-sm text-white/60 hover:text-white/90 transition-colors"
+            >
+              <History className="w-4 h-4" />
+              Connection audit log
+              <span className="text-white/30">{showAudit ? '▾' : '▸'}</span>
+            </button>
+            <label className="flex items-center gap-2 text-xs text-white/50 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={auditOn}
+                onChange={toggleAudit}
+                className="w-3.5 h-3.5 rounded accent-blue-600"
+              />
+              Record attempts
+            </label>
+          </div>
+          <p className="text-[11px] text-white/30 mt-1">
+            Local only — host, user, time, and outcome. Passwords are never recorded.
+          </p>
+          {showAudit && (
+            <div className="mt-3">
+              {auditEntries.length === 0 ? (
+                <p className="text-xs text-white/30 py-2">No attempts recorded yet.</p>
+              ) : (
+                <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+                  {auditEntries.map((e, i) => (
+                    <div key={`${e.ts}-${i}`} className="flex items-center gap-3 text-xs font-mono">
+                      <span className="text-white/30 shrink-0">
+                        {new Date(e.ts).toLocaleString()}
+                      </span>
+                      <span className="text-white/70 truncate">
+                        {e.username}@{e.host}:{e.port}
+                      </span>
+                      <span
+                        className={`shrink-0 px-1.5 py-0.5 rounded ${
+                          e.outcome === 'connected' || e.outcome === 'verify-ok'
+                            ? 'bg-green-500/15 text-green-300'
+                            : e.outcome === 'verify-fail' || e.outcome === 'error'
+                              ? 'bg-red-500/15 text-red-300'
+                              : 'bg-white/10 text-white/50'
+                        }`}
+                      >
+                        {e.outcome}
+                      </span>
+                      {e.detail && <span className="text-white/30 truncate">{e.detail}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {auditEntries.length > 0 && (
+                <button
+                  onClick={() => {
+                    if (confirm('Clear the connection audit log on this device?')) {
+                      clearAudit();
+                      setAuditEntries([]);
+                    }
+                  }}
+                  className="mt-2 text-xs text-red-400/80 hover:text-red-300 transition-colors"
+                >
+                  Clear log
+                </button>
+              )}
             </div>
           )}
         </div>
